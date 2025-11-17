@@ -313,3 +313,90 @@ def analyze_pptx_media(path: str, include_shared_media: bool = False) -> list[Sl
 
 ⸻
 
+
+## Quick Start Guide
+
+### Installation
+
+1. **Clone the repository**:
+   ```bash
+   git clone <repository-url>
+   cd slide_size
+   ```
+
+2. **Install dependencies**:
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+   Or install manually:
+   ```bash
+   pip install python-pptx pytest Pillow
+   ```
+
+### Basic Usage
+
+**Analyze a presentation**:
+```bash
+python pptx_heavy_slides.py presentation.pptx
+```
+
+**Show only top 5 heaviest slides**:
+```bash
+python pptx_heavy_slides.py presentation.pptx --top 5
+```
+
+**Export results to JSON and CSV**:
+```bash
+python pptx_heavy_slides.py presentation.pptx --output-json results.json --output-csv results.csv
+```
+
+**Include shared media in counts** (count images used on multiple slides for each slide):
+```bash
+python pptx_heavy_slides.py presentation.pptx --include-shared-media
+```
+
+**Enable verbose logging**:
+```bash
+python pptx_heavy_slides.py presentation.pptx --verbose
+```
+
+### Example Output
+
+```
+Analyzing: sample_presentation.pptx
+
+Total slides: 5
+
+Ranked by media size (descending):
+
+#1   Slide 1   |     8.4 KB | title="Marketing Campaign Photos"
+#2   Slide 2   |     2.7 KB | title="Product Screenshots"
+#3   Slide 3   |      586 B | title="Company Overview"
+#4   Slide 4   |     0.0 MB | title="Contact Information"
+#5   Slide 5   |     0.0 MB | title="Thank You"
+```
+
+**Note**: Slide 4 shows 0.0 MB because it uses the same image as Slide 3. By default, shared media is counted only once (on the first slide it appears). Use `--include-shared-media` to count it on every slide.
+
+### Running Tests
+
+```bash
+# Run all tests
+pytest
+
+# Run with verbose output
+pytest -v
+
+# Run specific test
+pytest tests/test_analyzer.py::test_shared_media_ignore_mode
+```
+
+### Creating a Sample Presentation
+
+A sample presentation generator is included:
+```bash
+python create_sample.py
+```
+
+This creates `sample_presentation.pptx` with various media sizes for testing.
