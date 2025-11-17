@@ -80,6 +80,9 @@ python pptx_heavy_slides.py presentation.pptx --output-json results.json --outpu
 
 # Include shared media in counts (count on every slide)
 python pptx_heavy_slides.py presentation.pptx --include-shared-media
+
+# Generate optimization recommendations
+python pptx_heavy_slides.py presentation.pptx --optimization-report
 ```
 
 ### Testing
@@ -116,6 +119,7 @@ The test suite (`tests/test_analyzer.py`) includes:
 - `--output-csv <path>`: Write results as CSV
 - `--include-shared-media`: Count shared media on every slide
 - `--ignore-shared-media`: Count shared media only once (default)
+- `--optimization-report`: Generate optimization recommendations (conference-quality focused)
 - `--verbose`: Enable debug logging
 - `--version`: Show version and exit
 
@@ -141,9 +145,83 @@ Uses Python's `logging` module for internal logging (not print statements).
 
 **Output sorting**: Always sorted by `total_media_bytes` descending (heaviest first).
 
+## Optimization Analysis (NEW FEATURE)
+
+### Purpose
+Analyzes presentations for image optimization opportunities while maintaining conference-quality standards. Designed for presentations projected on large screens (1920x1080 Full HD typical).
+
+### Detection Logic (Conservative Thresholds)
+
+**1. Oversized Resolution** (>2.5x display size)
+- Compares actual image pixel dimensions vs. display size on slide
+- Threshold: Image > 2.5x display dimensions
+- Recommendation: Resize to 2x display size (retina quality)
+- Priority: HIGH if >5x, MEDIUM if 2.5-5x
+
+**2. Absolute Size Caps** (>3200px longest edge)
+- Safety net for unreasonably large images
+- Recommendation: Resize to 2560px max (suitable for conference projectors)
+- Priority: MEDIUM
+
+**3. PNG Photos** (PNG >1MB)
+- Detects large PNG files that should be JPEG
+- Recommendation: Convert to JPEG quality 85-90
+- Priority: MEDIUM if >3MB, LOW otherwise
+
+**4. Uncompressed JPEG** (>1 byte/pixel)
+- Detects quality 95-100 JPEG that could use lower quality
+- Recommendation: Re-save at quality 85
+- Priority: LOW
+
+### Data Model
+
+```python
+class ImageDimensions(TypedDict):
+    pixel_width: int
+    pixel_height: int
+    display_width_px: int
+    display_height_px: int
+    resolution_ratio: float  # How many times larger than display
+
+class OptimizationOpportunity(TypedDict):
+    slide_index: int
+    slide_title: str | None
+    opportunity_type: str  # "oversized_resolution", "absolute_size", "png_photo", "uncompressed_jpeg"
+    current_bytes: int
+    potential_bytes: int
+    savings_bytes: int
+    savings_percent: float
+    current_dimensions: str
+    display_dimensions: str
+    recommended_dimensions: str
+    current_format: str
+    recommended_format: str
+    details: str
+    severity: str  # "high", "medium", "low"
+    is_shared: bool
+```
+
+### Key Functions
+
+- `get_image_dimensions(image_blob, shape)`: Extracts pixel and display dimensions
+- `analyze_image_optimization(...)`: Analyzes single image for opportunities
+- `analyze_optimization_opportunities(path)`: Main analysis function
+- `print_optimization_report(...)`: Formatted console output
+
+### Implementation Notes
+
+- Uses Pillow to extract actual pixel dimensions from image blob
+- Converts shape dimensions from EMUs to pixels (96 DPI standard)
+- Detects shared media (optimization affects all slides using image)
+- Conservative thresholds prioritize visual quality for conference projection
+- Estimates savings based on pixel reduction ratios
+
 ## Future Enhancements
 
 Potential improvements noted in code:
 - **Strategy B**: ZIP/relationships parsing for more precise media extraction
 - **Enhanced media detection**: Better video/audio relationship handling
 - **Relationship IDs**: Currently set to None, could be extracted from PPTX relationships
+- **Actual Optimization**: Implement blob replacement or post-processing to apply optimizations
+- **Dry-run mode**: Show optimization preview before applying changes
+- **Batch processing**: Optimize multiple presentations at once
