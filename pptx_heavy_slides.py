@@ -8,6 +8,7 @@ due to embedded media (images, videos, audio).
 
 import argparse
 import csv
+import io
 import json
 import logging
 import sys
@@ -15,6 +16,7 @@ from pathlib import Path
 from typing import TypedDict
 from collections import defaultdict
 
+from PIL import Image
 from pptx import Presentation
 from pptx.enum.shapes import MSO_SHAPE_TYPE
 
@@ -45,6 +47,34 @@ class SlideMediaStats(TypedDict):
     media_items: list[MediaItem]
 
 
+class ImageDimensions(TypedDict):
+    """Dimensions of an image in pixels and display size."""
+    pixel_width: int
+    pixel_height: int
+    display_width_px: int
+    display_height_px: int
+    resolution_ratio: float  # How many times larger the image is vs display
+
+
+class OptimizationOpportunity(TypedDict):
+    """Represents a potential optimization for an image."""
+    slide_index: int
+    slide_title: str | None
+    opportunity_type: str  # "oversized_resolution", "absolute_size", "png_photo", "uncompressed_jpeg"
+    current_bytes: int
+    potential_bytes: int
+    savings_bytes: int
+    savings_percent: float
+    current_dimensions: str  # e.g., "3840x2160"
+    display_dimensions: str  # e.g., "384x216"
+    recommended_dimensions: str  # e.g., "768x432"
+    current_format: str
+    recommended_format: str
+    details: str
+    severity: str  # "high", "medium", "low"
+    is_shared: bool
+
+
 def setup_logging(verbose: bool = False) -> None:
     """Configure logging based on verbosity level."""
     level = logging.DEBUG if verbose else logging.INFO
@@ -72,6 +102,225 @@ def get_slide_title(slide) -> str | None:
         return title_text if title_text else None
     except (AttributeError, IndexError):
         return None
+
+
+def get_image_dimensions(image_blob: bytes, shape) -> ImageDimensions:
+    """
+    Extract pixel and display dimensions for an image.
+
+    Args:
+        image_blob: The raw image bytes
+        shape: The shape object from python-pptx
+
+    Returns:
+        ImageDimensions with pixel and display information
+    """
+    # Get pixel dimensions using Pillow
+    img = Image.open(io.BytesIO(image_blob))
+    pixel_width, pixel_height = img.size
+
+    # Convert shape dimensions from EMUs to pixels (assuming 96 DPI)
+    # 1 inch = 914400 EMUs, 96 DPI means 96 pixels per inch
+    display_width_px = int(shape.width / 914400 * 96)
+    display_height_px = int(shape.height / 914400 * 96)
+
+    # Calculate resolution ratio (how much larger the image is than display)
+    if display_width_px > 0 and display_height_px > 0:
+        width_ratio = pixel_width / display_width_px
+        height_ratio = pixel_height / display_height_px
+        resolution_ratio = max(width_ratio, height_ratio)
+    else:
+        resolution_ratio = 1.0
+
+    return ImageDimensions(
+        pixel_width=pixel_width,
+        pixel_height=pixel_height,
+        display_width_px=display_width_px,
+        display_height_px=display_height_px,
+        resolution_ratio=resolution_ratio
+    )
+
+
+def analyze_image_optimization(
+    image_blob: bytes,
+    content_type: str,
+    dimensions: ImageDimensions,
+    slide_index: int,
+    slide_title: str | None,
+    is_shared: bool
+) -> list[OptimizationOpportunity]:
+    """
+    Analyze an image for optimization opportunities.
+
+    Conservative thresholds for conference-quality presentations:
+    - Allows 2x resolution for retina displays
+    - Flags truly wasteful oversizing (>2.5x display size)
+    - Identifies format and quality improvements
+
+    Args:
+        image_blob: Raw image bytes
+        content_type: MIME type (e.g., 'image/jpeg')
+        dimensions: Image dimensions info
+        slide_index: Slide number (1-based)
+        slide_title: Slide title or None
+        is_shared: Whether image is shared across slides
+
+    Returns:
+        List of optimization opportunities found
+    """
+    opportunities = []
+    current_bytes = len(image_blob)
+    img = Image.open(io.BytesIO(image_blob))
+    img_format = img.format
+
+    current_dim_str = f"{dimensions['pixel_width']}x{dimensions['pixel_height']}"
+    display_dim_str = f"{dimensions['display_width_px']}x{dimensions['display_height_px']}"
+
+    # 1. Check for oversized resolution (>2.5x display size)
+    # This is the most common and impactful issue
+    if dimensions['resolution_ratio'] > 2.5:
+        # Recommend 2x for retina quality
+        recommended_width = dimensions['display_width_px'] * 2
+        recommended_height = dimensions['display_height_px'] * 2
+
+        # Maintain aspect ratio
+        aspect_ratio = dimensions['pixel_width'] / dimensions['pixel_height']
+        if recommended_width / recommended_height > aspect_ratio:
+            recommended_width = int(recommended_height * aspect_ratio)
+        else:
+            recommended_height = int(recommended_width / aspect_ratio)
+
+        recommended_dim_str = f"{recommended_width}x{recommended_height}"
+
+        # Estimate savings: proportional to pixel reduction
+        pixel_reduction = (recommended_width * recommended_height) / (
+            dimensions['pixel_width'] * dimensions['pixel_height']
+        )
+        potential_bytes = int(current_bytes * pixel_reduction)
+        savings_bytes = current_bytes - potential_bytes
+
+        severity = "high" if dimensions['resolution_ratio'] > 5 else "medium"
+
+        opportunities.append(OptimizationOpportunity(
+            slide_index=slide_index,
+            slide_title=slide_title,
+            opportunity_type="oversized_resolution",
+            current_bytes=current_bytes,
+            potential_bytes=potential_bytes,
+            savings_bytes=savings_bytes,
+            savings_percent=round((savings_bytes / current_bytes) * 100, 1),
+            current_dimensions=current_dim_str,
+            display_dimensions=display_dim_str,
+            recommended_dimensions=recommended_dim_str,
+            current_format=img_format or content_type,
+            recommended_format=img_format or content_type,
+            details=f"Image is {dimensions['resolution_ratio']:.1f}x larger than display size. "
+                   f"Resizing to 2x (retina quality) would maintain sharpness on all screens.",
+            severity=severity,
+            is_shared=is_shared
+        ))
+
+    # 2. Check for absolute size caps (>3200px on longest edge)
+    # Safety net for unreasonably large images
+    max_dimension = max(dimensions['pixel_width'], dimensions['pixel_height'])
+    if max_dimension > 3200:
+        # Recommend 2560px max (covers retina 1280px displays, suitable for conference projectors)
+        target_max = 2560
+        aspect_ratio = dimensions['pixel_width'] / dimensions['pixel_height']
+
+        if dimensions['pixel_width'] > dimensions['pixel_height']:
+            recommended_width = target_max
+            recommended_height = int(target_max / aspect_ratio)
+        else:
+            recommended_height = target_max
+            recommended_width = int(target_max * aspect_ratio)
+
+        recommended_dim_str = f"{recommended_width}x{recommended_height}"
+
+        pixel_reduction = (recommended_width * recommended_height) / (
+            dimensions['pixel_width'] * dimensions['pixel_height']
+        )
+        potential_bytes = int(current_bytes * pixel_reduction)
+        savings_bytes = current_bytes - potential_bytes
+
+        # Only add if not already caught by oversized resolution check
+        if not any(opp['opportunity_type'] == 'oversized_resolution' for opp in opportunities):
+            opportunities.append(OptimizationOpportunity(
+                slide_index=slide_index,
+                slide_title=slide_title,
+                opportunity_type="absolute_size",
+                current_bytes=current_bytes,
+                potential_bytes=potential_bytes,
+                savings_bytes=savings_bytes,
+                savings_percent=round((savings_bytes / current_bytes) * 100, 1),
+                current_dimensions=current_dim_str,
+                display_dimensions=display_dim_str,
+                recommended_dimensions=recommended_dim_str,
+                current_format=img_format or content_type,
+                recommended_format=img_format or content_type,
+                details=f"Image exceeds {max_dimension}px. Conference projectors rarely exceed "
+                       f"1920x1080 (Full HD). Recommend max {target_max}px for high-quality projection.",
+                severity="medium",
+                is_shared=is_shared
+            ))
+
+    # 3. Check for PNG photos (should be JPEG)
+    # PNG is great for screenshots/diagrams, wasteful for photos
+    if img_format == 'PNG' and current_bytes > 1_000_000:  # >1MB
+        # Estimate JPEG size at quality 85 (roughly 70-80% reduction for photos)
+        potential_bytes = int(current_bytes * 0.3)  # Conservative estimate
+        savings_bytes = current_bytes - potential_bytes
+
+        opportunities.append(OptimizationOpportunity(
+            slide_index=slide_index,
+            slide_title=slide_title,
+            opportunity_type="png_photo",
+            current_bytes=current_bytes,
+            potential_bytes=potential_bytes,
+            savings_bytes=savings_bytes,
+            savings_percent=round((savings_bytes / current_bytes) * 100, 1),
+            current_dimensions=current_dim_str,
+            display_dimensions=display_dim_str,
+            recommended_dimensions=current_dim_str,
+            current_format="PNG",
+            recommended_format="JPEG",
+            details=f"Large PNG file ({format_bytes(current_bytes)}). Converting to JPEG "
+                   f"at quality 85-90 provides visually identical results for photos, "
+                   f"with significant file size reduction.",
+            severity="medium" if current_bytes > 3_000_000 else "low",
+            is_shared=is_shared
+        ))
+
+    # 4. Check for uncompressed/high-quality JPEG
+    # JPEG with >1 byte/pixel suggests quality 95-100 (often unnecessary for presentations)
+    if img_format == 'JPEG':
+        bytes_per_pixel = current_bytes / (dimensions['pixel_width'] * dimensions['pixel_height'])
+        if bytes_per_pixel > 1.0:
+            # Estimate re-saving at quality 85 (roughly 50% reduction)
+            potential_bytes = int(current_bytes * 0.5)
+            savings_bytes = current_bytes - potential_bytes
+
+            opportunities.append(OptimizationOpportunity(
+                slide_index=slide_index,
+                slide_title=slide_title,
+                opportunity_type="uncompressed_jpeg",
+                current_bytes=current_bytes,
+                potential_bytes=potential_bytes,
+                savings_bytes=savings_bytes,
+                savings_percent=round((savings_bytes / current_bytes) * 100, 1),
+                current_dimensions=current_dim_str,
+                display_dimensions=display_dim_str,
+                recommended_dimensions=current_dim_str,
+                current_format="JPEG (high quality)",
+                recommended_format="JPEG (quality 85)",
+                details=f"JPEG file appears to use very high compression quality "
+                       f"({bytes_per_pixel:.2f} bytes/pixel). Re-saving at quality 85 "
+                       f"produces visually identical results for conference projection.",
+                severity="low",
+                is_shared=is_shared
+            ))
+
+    return opportunities
 
 
 def analyze_pptx_media(path: str, include_shared_media: bool = False) -> list[SlideMediaStats]:
@@ -373,6 +622,171 @@ def write_csv_output(results: list[SlideMediaStats], output_path: str) -> None:
         raise IOError(f"failed to write output file {output_path}: {e}")
 
 
+def analyze_optimization_opportunities(path: str) -> list[OptimizationOpportunity]:
+    """
+    Analyze a PowerPoint file for image optimization opportunities.
+
+    Args:
+        path: Path to the .pptx file
+
+    Returns:
+        List of OptimizationOpportunity, sorted by potential savings descending
+
+    Raises:
+        FileNotFoundError: If the file doesn't exist
+        ValueError: If the file is not a .pptx file or is corrupt
+    """
+    # Validate file
+    file_path = Path(path)
+    if not file_path.exists():
+        raise FileNotFoundError(f"file not found: {path}")
+
+    if file_path.suffix.lower() != '.pptx':
+        raise ValueError(f"unsupported file type (expected .pptx): {path}")
+
+    # Open presentation
+    try:
+        prs = Presentation(path)
+    except Exception as e:
+        raise ValueError(f"failed to open .pptx: {e}")
+
+    logging.info(f"Analyzing {len(prs.slides)} slides for optimization opportunities")
+
+    # Track shared media
+    media_registry = {}  # key: image blob hash -> value: {size, slides, first_slide}
+    slide_shapes_map = {}  # slide_index -> list of (shape, media_key)
+
+    # First pass: collect all images and detect sharing
+    for slide_idx, slide in enumerate(prs.slides, start=1):
+        slide_shapes_map[slide_idx] = []
+
+        for shape in slide.shapes:
+            if shape.shape_type == MSO_SHAPE_TYPE.PICTURE:
+                try:
+                    image = shape.image
+                    blob = image.blob
+                    media_key = hash(blob)
+
+                    if media_key not in media_registry:
+                        media_registry[media_key] = {
+                            'blob': blob,
+                            'content_type': image.content_type,
+                            'slides': [],
+                            'first_slide': slide_idx
+                        }
+
+                    media_registry[media_key]['slides'].append(slide_idx)
+                    slide_shapes_map[slide_idx].append((shape, media_key))
+
+                except Exception as e:
+                    logging.warning(f"Failed to analyze image on slide {slide_idx}: {e}")
+
+    # Second pass: analyze each unique image for optimization opportunities
+    all_opportunities = []
+
+    for slide_idx, slide in enumerate(prs.slides, start=1):
+        slide_title = get_slide_title(slide)
+
+        for shape, media_key in slide_shapes_map.get(slide_idx, []):
+            media_info = media_registry[media_key]
+            is_shared = len(media_info['slides']) > 1
+            is_first_appearance = media_info['first_slide'] == slide_idx
+
+            # Only analyze each unique image once (on first appearance)
+            if not is_first_appearance:
+                continue
+
+            try:
+                # Get image dimensions
+                dimensions = get_image_dimensions(media_info['blob'], shape)
+
+                # Analyze for optimization opportunities
+                opportunities = analyze_image_optimization(
+                    image_blob=media_info['blob'],
+                    content_type=media_info['content_type'],
+                    dimensions=dimensions,
+                    slide_index=slide_idx,
+                    slide_title=slide_title,
+                    is_shared=is_shared
+                )
+
+                all_opportunities.extend(opportunities)
+
+            except Exception as e:
+                logging.warning(f"Failed to analyze optimization for slide {slide_idx}: {e}")
+
+    # Sort by potential savings (highest first)
+    all_opportunities.sort(key=lambda x: x['savings_bytes'], reverse=True)
+
+    return all_opportunities
+
+
+def print_optimization_report(opportunities: list[OptimizationOpportunity], filename: str) -> None:
+    """
+    Print human-readable optimization report to console.
+
+    Args:
+        opportunities: List of optimization opportunities
+        filename: Name of the analyzed file
+    """
+    if not opportunities:
+        print(f"\nOptimization Report: {filename}")
+        print("\nNo optimization opportunities found. Your images are well-optimized!")
+        return
+
+    # Calculate total potential savings
+    total_savings = sum(opp['savings_bytes'] for opp in opportunities)
+    total_current = sum(opp['current_bytes'] for opp in opportunities)
+    total_savings_pct = (total_savings / total_current * 100) if total_current > 0 else 0
+
+    # Group by severity
+    high_severity = [opp for opp in opportunities if opp['severity'] == 'high']
+    medium_severity = [opp for opp in opportunities if opp['severity'] == 'medium']
+    low_severity = [opp for opp in opportunities if opp['severity'] == 'low']
+
+    print(f"\n{'='*80}")
+    print(f"OPTIMIZATION REPORT: {filename}")
+    print(f"{'='*80}")
+    print(f"\nSUMMARY:")
+    print(f"  Total opportunities found: {len(opportunities)}")
+    print(f"  Potential savings: {format_bytes(total_savings)} ({total_savings_pct:.1f}% reduction)")
+    print(f"  High priority: {len(high_severity)} | Medium: {len(medium_severity)} | Low: {len(low_severity)}")
+
+    print(f"\n{'='*80}")
+    print(f"RECOMMENDATIONS (sorted by potential savings):")
+    print(f"{'='*80}\n")
+
+    for idx, opp in enumerate(opportunities, start=1):
+        severity_marker = {
+            'high': '🔴 HIGH',
+            'medium': '🟡 MEDIUM',
+            'low': '🟢 LOW'
+        }.get(opp['severity'], opp['severity'])
+
+        print(f"#{idx} - Slide {opp['slide_index']}: {opp['slide_title'] or '(no title)'}")
+        print(f"    Priority: {severity_marker}")
+        print(f"    Current: {format_bytes(opp['current_bytes'])} | {opp['current_format']} | {opp['current_dimensions']}")
+        print(f"    Display size: {opp['display_dimensions']} pixels")
+        print(f"    Recommended: {opp['recommended_format']} | {opp['recommended_dimensions']}")
+        print(f"    Potential savings: {format_bytes(opp['savings_bytes'])} ({opp['savings_percent']}%)")
+
+        if opp['is_shared']:
+            print(f"    ⚠️  SHARED: This image appears on multiple slides - optimization affects all")
+
+        print(f"    💡 {opp['details']}")
+        print()
+
+    print(f"{'='*80}")
+    print(f"NOTES FOR CONFERENCE PRESENTATIONS:")
+    print(f"{'='*80}")
+    print(f"  • Most conference projectors are 1920x1080 (Full HD)")
+    print(f"  • 2x resolution (e.g., 1536x864 for 768x432 display) ensures retina quality")
+    print(f"  • Images larger than 2560px rarely improve visual quality on projectors")
+    print(f"  • JPEG quality 85-90 is visually identical to quality 95-100 when projected")
+    print(f"  • PNG is best for screenshots/diagrams; JPEG is best for photos")
+    print()
+
+
 def main() -> int:
     """Main CLI entry point. Returns exit code."""
     parser = argparse.ArgumentParser(
@@ -418,6 +832,12 @@ def main() -> int:
     )
 
     parser.add_argument(
+        '--optimization-report',
+        action='store_true',
+        help='Generate optimization recommendations for reducing file size (conference-quality focused)'
+    )
+
+    parser.add_argument(
         '--verbose',
         action='store_true',
         help='Enable verbose debug logging'
@@ -435,22 +855,28 @@ def main() -> int:
     setup_logging(args.verbose)
 
     try:
-        # Analyze the presentation
-        results = analyze_pptx_media(
-            args.input_path,
-            include_shared_media=args.include_shared_media
-        )
+        # Check if optimization report is requested
+        if args.optimization_report:
+            # Run optimization analysis
+            opportunities = analyze_optimization_opportunities(args.input_path)
+            print_optimization_report(opportunities, args.input_path)
+        else:
+            # Run standard media analysis
+            results = analyze_pptx_media(
+                args.input_path,
+                include_shared_media=args.include_shared_media
+            )
 
-        # Console output (always show)
-        print_console_output(results, args.input_path, args.top)
+            # Console output (always show)
+            print_console_output(results, args.input_path, args.top)
 
-        # Optional JSON output
-        if args.output_json:
-            write_json_output(results, args.output_json)
+            # Optional JSON output
+            if args.output_json:
+                write_json_output(results, args.output_json)
 
-        # Optional CSV output
-        if args.output_csv:
-            write_csv_output(results, args.output_csv)
+            # Optional CSV output
+            if args.output_csv:
+                write_csv_output(results, args.output_csv)
 
         return 0
 

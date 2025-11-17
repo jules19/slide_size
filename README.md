@@ -361,6 +361,13 @@ python pptx_heavy_slides.py presentation.pptx --include-shared-media
 python pptx_heavy_slides.py presentation.pptx --verbose
 ```
 
+**Generate optimization recommendations**:
+```bash
+python pptx_heavy_slides.py presentation.pptx --optimization-report
+```
+
+This analyzes images for potential file size reductions while maintaining conference-quality presentation standards (suitable for large screen projection).
+
 ### Example Output
 
 ```
@@ -378,6 +385,58 @@ Ranked by media size (descending):
 ```
 
 **Note**: Slide 4 shows 0.0 MB because it uses the same image as Slide 3. By default, shared media is counted only once (on the first slide it appears). Use `--include-shared-media` to count it on every slide.
+
+### Optimization Report Example
+
+```
+================================================================================
+OPTIMIZATION REPORT: presentation.pptx
+================================================================================
+
+SUMMARY:
+  Total opportunities found: 5
+  Potential savings: 176.2 KB (85.5% reduction)
+  High priority: 2 | Medium: 3 | Low: 0
+
+================================================================================
+RECOMMENDATIONS (sorted by potential savings):
+================================================================================
+
+#1 - Slide 1: Market Analysis Q4
+    Priority: 🔴 HIGH
+    Current: 127.2 KB | JPEG | 3840x2160
+    Display size: 384x216 pixels
+    Recommended: JPEG | 768x432
+    Potential savings: 122.1 KB (96.0%)
+    💡 Image is 10.0x larger than display size. Resizing to 2x (retina quality)
+       would maintain sharpness on all screens.
+
+#2 - Slide 5: Company Overview
+    Priority: 🔴 HIGH
+    Current: 11.0 KB | PNG | 1600x1600
+    Display size: 144x144 pixels
+    Recommended: PNG | 288x288
+    Potential savings: 10.7 KB (96.8%)
+    ⚠️  SHARED: This image appears on multiple slides - optimization affects all
+    💡 Image is 11.1x larger than display size. Resizing to 2x (retina quality)
+       would maintain sharpness on all screens.
+
+================================================================================
+NOTES FOR CONFERENCE PRESENTATIONS:
+================================================================================
+  • Most conference projectors are 1920x1080 (Full HD)
+  • 2x resolution (e.g., 1536x864 for 768x432 display) ensures retina quality
+  • Images larger than 2560px rarely improve visual quality on projectors
+  • JPEG quality 85-90 is visually identical to quality 95-100 when projected
+  • PNG is best for screenshots/diagrams; JPEG is best for photos
+```
+
+The optimization report uses conservative thresholds designed for conference presentations:
+- Maintains 2x resolution for retina display quality
+- Only flags images >2.5x display size as oversized
+- Recommends max 2560px for compatibility with most projectors
+- Detects format optimization opportunities (PNG→JPEG for photos)
+- Identifies shared media that affects multiple slides
 
 ### Running Tests
 
