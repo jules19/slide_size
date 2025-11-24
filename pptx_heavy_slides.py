@@ -1148,6 +1148,23 @@ def delete_unused_layouts(path: str) -> tuple[int, int, str]:
 
 def main() -> int:
     """Main CLI entry point. Returns exit code."""
+    # Show description if no arguments provided
+    if len(sys.argv) == 1:
+        print("PowerPoint Heavy Slides Analyzer")
+        print("=" * 35)
+        print("\nAnalyzes .pptx files to identify which slides contribute most")
+        print("to file size due to embedded media (images, videos, audio).")
+        print("\nUsage:")
+        print("  pptx-analyzer <file.pptx>                    Analyze media by slide")
+        print("  pptx-analyzer <file.pptx> --top 5            Show top 5 heaviest slides")
+        print("  pptx-analyzer <file.pptx> --optimization-report")
+        print("                                               Find image optimization opportunities")
+        print("  pptx-analyzer <file.pptx> --masters-report   Analyze slide masters/layouts")
+        print("  pptx-analyzer <file.pptx> --delete-unused-layouts")
+        print("                                               Remove unused layouts")
+        print("\nRun with --help for all options.")
+        return 0
+
     parser = argparse.ArgumentParser(
         description='Analyze PowerPoint files to identify heavy slides with embedded media.',
         formatter_class=argparse.RawDescriptionHelpFormatter
