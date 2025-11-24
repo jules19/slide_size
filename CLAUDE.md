@@ -83,6 +83,9 @@ python pptx_heavy_slides.py presentation.pptx --include-shared-media
 
 # Generate optimization recommendations
 python pptx_heavy_slides.py presentation.pptx --optimization-report
+
+# Analyze slide masters and unused layouts
+python pptx_heavy_slides.py presentation.pptx --masters-report
 ```
 
 ### Testing
@@ -120,6 +123,7 @@ The test suite (`tests/test_analyzer.py`) includes:
 - `--include-shared-media`: Count shared media on every slide
 - `--ignore-shared-media`: Count shared media only once (default)
 - `--optimization-report`: Generate optimization recommendations (conference-quality focused)
+- `--masters-report`: Analyze slide masters and layouts for unused templates with media
 - `--verbose`: Enable debug logging
 - `--version`: Show version and exit
 
@@ -215,6 +219,70 @@ class OptimizationOpportunity(TypedDict):
 - Detects shared media (optimization affects all slides using image)
 - Conservative thresholds prioritize visual quality for conference projection
 - Estimates savings based on pixel reduction ratios
+
+## Slide Masters Analysis
+
+### Purpose
+Analyzes slide masters and their layouts to identify unused templates that may contain embedded media, contributing to file bloat. Common issue when presentations are created from templates with many unused layout options.
+
+### What It Reports
+
+1. **Summary statistics**: Total masters, layouts, and unused layouts
+2. **Media in masters**: Images embedded directly on slide masters
+3. **Media in layouts**: Images embedded in individual layout templates
+4. **Unused layout detection**: Layouts not used by any slide in the presentation
+5. **Potential savings**: Total bytes that could be saved by deleting unused layouts
+
+### Data Model
+
+```python
+class LayoutMediaStats(TypedDict):
+    layout_name: str
+    layout_index: int
+    total_media_bytes: int
+    image_bytes: int
+    video_bytes: int
+    audio_bytes: int
+    other_media_bytes: int
+    media_count: int
+    is_used: bool              # Whether any slide uses this layout
+    slides_using: list[int]    # Slide indices using this layout
+
+class MasterMediaStats(TypedDict):
+    master_index: int
+    master_name: str | None
+    total_media_bytes: int     # Media directly on master
+    image_bytes: int
+    video_bytes: int
+    audio_bytes: int
+    other_media_bytes: int
+    media_count: int
+    layouts: list[LayoutMediaStats]
+    total_layout_bytes: int    # Sum of all layout media
+    unused_layout_bytes: int   # Media in unused layouts
+
+class MastersReport(TypedDict):
+    total_masters: int
+    total_layouts: int
+    unused_layouts: int
+    total_master_media_bytes: int
+    total_layout_media_bytes: int
+    unused_layout_media_bytes: int
+    masters: list[MasterMediaStats]
+```
+
+### Key Functions
+
+- `analyze_slide_masters(path)`: Main analysis function, returns MastersReport
+- `print_masters_report(report, filename)`: Formatted console output
+
+### Implementation Notes
+
+- Uses `prs.slide_masters` to access all masters
+- Uses `master.slide_layouts` to access layouts within each master
+- Tracks layout usage by comparing `id(slide.slide_layout)` for each slide
+- Scans shapes on both masters and layouts for `MSO_SHAPE_TYPE.PICTURE`
+- Provides actionable recommendations for deleting unused layouts in PowerPoint
 
 ## Future Enhancements
 

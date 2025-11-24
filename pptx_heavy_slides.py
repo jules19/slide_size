@@ -75,6 +75,46 @@ class OptimizationOpportunity(TypedDict):
     is_shared: bool
 
 
+class LayoutMediaStats(TypedDict):
+    """Statistics about media content in a slide layout."""
+    layout_name: str
+    layout_index: int  # Index within master
+    total_media_bytes: int
+    image_bytes: int
+    video_bytes: int
+    audio_bytes: int
+    other_media_bytes: int
+    media_count: int
+    is_used: bool  # Whether any slide uses this layout
+    slides_using: list[int]  # 1-based slide indices using this layout
+
+
+class MasterMediaStats(TypedDict):
+    """Statistics about media content in a slide master."""
+    master_index: int  # 1-based
+    master_name: str | None
+    total_media_bytes: int  # Media directly on master
+    image_bytes: int
+    video_bytes: int
+    audio_bytes: int
+    other_media_bytes: int
+    media_count: int
+    layouts: list[LayoutMediaStats]
+    total_layout_bytes: int  # Sum of all layout media
+    unused_layout_bytes: int  # Media in unused layouts
+
+
+class MastersReport(TypedDict):
+    """Complete report on slide masters and layouts."""
+    total_masters: int
+    total_layouts: int
+    unused_layouts: int
+    total_master_media_bytes: int
+    total_layout_media_bytes: int
+    unused_layout_media_bytes: int
+    masters: list[MasterMediaStats]
+
+
 def setup_logging(verbose: bool = False) -> None:
     """Configure logging based on verbosity level."""
     level = logging.DEBUG if verbose else logging.INFO
@@ -787,6 +827,325 @@ def print_optimization_report(opportunities: list[OptimizationOpportunity], file
     print()
 
 
+def analyze_slide_masters(path: str) -> MastersReport:
+    """
+    Analyze slide masters and layouts for media content and usage.
+
+    Args:
+        path: Path to the .pptx file
+
+    Returns:
+        MastersReport with complete analysis of masters and layouts
+
+    Raises:
+        FileNotFoundError: If the file doesn't exist
+        ValueError: If the file is not a .pptx file or is corrupt
+    """
+    # Validate file
+    file_path = Path(path)
+    if not file_path.exists():
+        raise FileNotFoundError(f"file not found: {path}")
+
+    if file_path.suffix.lower() != '.pptx':
+        raise ValueError(f"unsupported file type (expected .pptx): {path}")
+
+    # Open presentation
+    try:
+        prs = Presentation(path)
+    except Exception as e:
+        raise ValueError(f"failed to open .pptx: {e}")
+
+    logging.info(f"Analyzing {len(prs.slide_masters)} slide masters")
+
+    # Build a map of which layouts are used by which slides
+    layout_usage = {}  # layout id -> list of slide indices
+    for slide_idx, slide in enumerate(prs.slides, start=1):
+        layout_id = id(slide.slide_layout)
+        if layout_id not in layout_usage:
+            layout_usage[layout_id] = []
+        layout_usage[layout_id].append(slide_idx)
+
+    masters_stats = []
+    total_master_media = 0
+    total_layout_media = 0
+    total_unused_layout_media = 0
+    total_layouts = 0
+    unused_layouts = 0
+
+    # Analyze each slide master
+    for master_idx, master in enumerate(prs.slide_masters, start=1):
+        # Get master name
+        master_name = None
+        try:
+            # Try to get theme name or other identifier
+            if hasattr(master, 'name') and master.name:
+                master_name = master.name
+        except Exception:
+            pass
+
+        # Analyze media directly on the master
+        master_image_bytes = 0
+        master_video_bytes = 0
+        master_audio_bytes = 0
+        master_other_bytes = 0
+        master_media_count = 0
+
+        for shape in master.shapes:
+            if shape.shape_type == MSO_SHAPE_TYPE.PICTURE:
+                try:
+                    blob = shape.image.blob
+                    master_image_bytes += len(blob)
+                    master_media_count += 1
+                except Exception as e:
+                    logging.warning(f"Failed to extract image from master {master_idx}: {e}")
+
+        master_total = master_image_bytes + master_video_bytes + master_audio_bytes + master_other_bytes
+        total_master_media += master_total
+
+        # Analyze each layout in this master
+        layout_stats = []
+        master_layout_bytes = 0
+        master_unused_bytes = 0
+
+        for layout_idx, layout in enumerate(master.slide_layouts, start=1):
+            total_layouts += 1
+            layout_id = id(layout)
+            slides_using = layout_usage.get(layout_id, [])
+            is_used = len(slides_using) > 0
+
+            if not is_used:
+                unused_layouts += 1
+
+            # Get layout name
+            layout_name = layout.name if hasattr(layout, 'name') and layout.name else f"Layout {layout_idx}"
+
+            # Analyze media in this layout
+            layout_image_bytes = 0
+            layout_video_bytes = 0
+            layout_audio_bytes = 0
+            layout_other_bytes = 0
+            layout_media_count = 0
+
+            for shape in layout.shapes:
+                if shape.shape_type == MSO_SHAPE_TYPE.PICTURE:
+                    try:
+                        blob = shape.image.blob
+                        layout_image_bytes += len(blob)
+                        layout_media_count += 1
+                    except Exception as e:
+                        logging.warning(f"Failed to extract image from layout {layout_name}: {e}")
+
+            layout_total = layout_image_bytes + layout_video_bytes + layout_audio_bytes + layout_other_bytes
+            master_layout_bytes += layout_total
+            total_layout_media += layout_total
+
+            if not is_used:
+                master_unused_bytes += layout_total
+                total_unused_layout_media += layout_total
+
+            layout_stat: LayoutMediaStats = {
+                'layout_name': layout_name,
+                'layout_index': layout_idx,
+                'total_media_bytes': layout_total,
+                'image_bytes': layout_image_bytes,
+                'video_bytes': layout_video_bytes,
+                'audio_bytes': layout_audio_bytes,
+                'other_media_bytes': layout_other_bytes,
+                'media_count': layout_media_count,
+                'is_used': is_used,
+                'slides_using': slides_using
+            }
+            layout_stats.append(layout_stat)
+
+        master_stat: MasterMediaStats = {
+            'master_index': master_idx,
+            'master_name': master_name,
+            'total_media_bytes': master_total,
+            'image_bytes': master_image_bytes,
+            'video_bytes': master_video_bytes,
+            'audio_bytes': master_audio_bytes,
+            'other_media_bytes': master_other_bytes,
+            'media_count': master_media_count,
+            'layouts': layout_stats,
+            'total_layout_bytes': master_layout_bytes,
+            'unused_layout_bytes': master_unused_bytes
+        }
+        masters_stats.append(master_stat)
+
+    report: MastersReport = {
+        'total_masters': len(prs.slide_masters),
+        'total_layouts': total_layouts,
+        'unused_layouts': unused_layouts,
+        'total_master_media_bytes': total_master_media,
+        'total_layout_media_bytes': total_layout_media,
+        'unused_layout_media_bytes': total_unused_layout_media,
+        'masters': masters_stats
+    }
+
+    return report
+
+
+def print_masters_report(report: MastersReport, filename: str) -> None:
+    """
+    Print human-readable masters report to console.
+
+    Args:
+        report: MastersReport from analyze_slide_masters
+        filename: Name of the analyzed file
+    """
+    print(f"\n{'='*80}")
+    print(f"SLIDE MASTERS REPORT: {filename}")
+    print(f"{'='*80}")
+
+    # Summary
+    print(f"\nSUMMARY:")
+    print(f"  Total slide masters: {report['total_masters']}")
+    print(f"  Total layouts: {report['total_layouts']}")
+    print(f"  Unused layouts: {report['unused_layouts']}")
+    print(f"\n  Media in masters: {format_bytes(report['total_master_media_bytes'])}")
+    print(f"  Media in layouts: {format_bytes(report['total_layout_media_bytes'])}")
+    print(f"  Media in UNUSED layouts: {format_bytes(report['unused_layout_media_bytes'])}")
+
+    if report['unused_layout_media_bytes'] > 0:
+        print(f"\n  ⚠️  You could save {format_bytes(report['unused_layout_media_bytes'])} by deleting unused layouts")
+
+    # Details per master
+    for master in report['masters']:
+        print(f"\n{'-'*80}")
+        master_name = master['master_name'] or f"Master {master['master_index']}"
+        print(f"MASTER {master['master_index']}: {master_name}")
+        print(f"{'-'*80}")
+
+        if master['media_count'] > 0:
+            print(f"  Media on master: {format_bytes(master['total_media_bytes'])} ({master['media_count']} items)")
+        else:
+            print(f"  Media on master: (none)")
+
+        print(f"  Layouts: {len(master['layouts'])} total, {format_bytes(master['total_layout_bytes'])} media")
+
+        if master['unused_layout_bytes'] > 0:
+            print(f"  ⚠️  Unused layout media: {format_bytes(master['unused_layout_bytes'])}")
+
+        # List layouts with media or unused status
+        layouts_with_media = [l for l in master['layouts'] if l['total_media_bytes'] > 0]
+        unused_layouts = [l for l in master['layouts'] if not l['is_used']]
+
+        if layouts_with_media:
+            print(f"\n  Layouts with media:")
+            for layout in sorted(layouts_with_media, key=lambda x: x['total_media_bytes'], reverse=True):
+                status = "UNUSED" if not layout['is_used'] else f"used by {len(layout['slides_using'])} slides"
+                print(f"    • {layout['layout_name']}: {format_bytes(layout['total_media_bytes'])} [{status}]")
+
+        if unused_layouts:
+            unused_with_no_media = [l for l in unused_layouts if l['total_media_bytes'] == 0]
+            if unused_with_no_media:
+                print(f"\n  Unused layouts (no media):")
+                for layout in unused_with_no_media:
+                    print(f"    • {layout['layout_name']}")
+
+    # Recommendations
+    if report['unused_layouts'] > 0:
+        print(f"\n{'='*80}")
+        print(f"RECOMMENDATIONS:")
+        print(f"{'='*80}")
+        print(f"\n  To reduce file size, consider deleting unused layouts:")
+        print(f"  1. Open the presentation in PowerPoint")
+        print(f"  2. Go to View > Slide Master")
+        print(f"  3. Right-click unused layouts and select 'Delete Layout'")
+        print(f"  4. Close the Slide Master view")
+
+        if report['unused_layout_media_bytes'] > 0:
+            print(f"\n  Potential savings: {format_bytes(report['unused_layout_media_bytes'])}")
+
+    print()
+
+
+def delete_unused_layouts(path: str) -> tuple[int, int, str]:
+    """
+    Delete unused layouts from a presentation.
+
+    Args:
+        path: Path to the .pptx file
+
+    Returns:
+        Tuple of (layouts_deleted, bytes_saved, output_path)
+
+    Raises:
+        FileNotFoundError: If the file doesn't exist
+        ValueError: If the file is not a .pptx file or is corrupt
+    """
+    # Validate file
+    file_path = Path(path)
+    if not file_path.exists():
+        raise FileNotFoundError(f"file not found: {path}")
+
+    if file_path.suffix.lower() != '.pptx':
+        raise ValueError(f"unsupported file type (expected .pptx): {path}")
+
+    # Open presentation
+    try:
+        prs = Presentation(path)
+    except Exception as e:
+        raise ValueError(f"failed to open .pptx: {e}")
+
+    # Build a set of used layout ids
+    used_layout_ids = set()
+    for slide in prs.slides:
+        used_layout_ids.add(id(slide.slide_layout))
+
+    # Find and delete unused layouts
+    layouts_deleted = 0
+    bytes_saved = 0
+
+    for master in prs.slide_masters:
+        # Collect unused layouts (must iterate in reverse to avoid index issues)
+        layouts_to_delete = []
+        for layout in master.slide_layouts:
+            if id(layout) not in used_layout_ids:
+                # Calculate bytes in this layout
+                layout_bytes = 0
+                for shape in layout.shapes:
+                    if shape.shape_type == MSO_SHAPE_TYPE.PICTURE:
+                        try:
+                            layout_bytes += len(shape.image.blob)
+                        except Exception:
+                            pass
+                layouts_to_delete.append((layout, layout_bytes))
+
+        # Delete unused layouts by removing from the sldLayoutIdLst
+        sldLayoutIdLst = master._element.get_or_add_sldLayoutIdLst()
+
+        for layout, layout_bytes in layouts_to_delete:
+            try:
+                # Find and remove the sldLayoutId entry for this layout
+                for sldLayoutId in list(sldLayoutIdLst):
+                    rId = sldLayoutId.get('{http://schemas.openxmlformats.org/officeDocument/2006/relationships}id')
+                    if rId:
+                        rel = master.part.rels.get(rId)
+                        if rel and rel.target_part == layout.part:
+                            sldLayoutIdLst.remove(sldLayoutId)
+                            layouts_deleted += 1
+                            bytes_saved += layout_bytes
+                            logging.debug(f"Deleted layout: {layout.name}")
+                            break
+            except Exception as e:
+                logging.warning(f"Failed to delete layout {layout.name}: {e}")
+
+    # Save to new file
+    output_path = str(file_path.with_stem(file_path.stem + "_cleaned"))
+    try:
+        prs.save(output_path)
+        logging.info(f"Saved cleaned presentation to: {output_path}")
+    except Exception as e:
+        raise IOError(f"failed to save cleaned presentation: {e}")
+
+    # Note: Orphaned media files may remain in the package.
+    # Use PowerPoint's "Compress Pictures" or File > Info > Compress Media
+    # to fully clean up after deleting layouts.
+
+    return layouts_deleted, bytes_saved, output_path
+
+
 def main() -> int:
     """Main CLI entry point. Returns exit code."""
     parser = argparse.ArgumentParser(
@@ -838,6 +1197,18 @@ def main() -> int:
     )
 
     parser.add_argument(
+        '--masters-report',
+        action='store_true',
+        help='Generate report on slide masters and layouts, including unused layouts with media'
+    )
+
+    parser.add_argument(
+        '--delete-unused-layouts',
+        action='store_true',
+        help='Delete unused layouts and save as new file (original is preserved)'
+    )
+
+    parser.add_argument(
         '--verbose',
         action='store_true',
         help='Enable verbose debug logging'
@@ -855,8 +1226,36 @@ def main() -> int:
     setup_logging(args.verbose)
 
     try:
+        # Check if delete unused layouts is requested
+        if args.delete_unused_layouts:
+            # First show what will be deleted
+            report = analyze_slide_masters(args.input_path)
+            print_masters_report(report, args.input_path)
+
+            if report['unused_layouts'] > 0:
+                # Delete unused layouts
+                layouts_deleted, bytes_saved, output_path = delete_unused_layouts(args.input_path)
+                print(f"\n{'='*80}")
+                print(f"CLEANUP COMPLETE")
+                print(f"{'='*80}")
+                print(f"  Layouts deleted: {layouts_deleted}")
+                print(f"  Saved to: {output_path}")
+                print(f"  Original file preserved: {args.input_path}")
+                if bytes_saved > 0:
+                    print(f"\n  To fully reclaim {format_bytes(bytes_saved)} from orphaned media:")
+                    print(f"  1. Open {output_path} in PowerPoint")
+                    print(f"  2. File > Info > Compress Media (or Compress Pictures)")
+                    print(f"  3. Save the file")
+                print()
+            else:
+                print("\nNo unused layouts to delete.")
+        # Check if masters report is requested
+        elif args.masters_report:
+            # Run masters analysis
+            report = analyze_slide_masters(args.input_path)
+            print_masters_report(report, args.input_path)
         # Check if optimization report is requested
-        if args.optimization_report:
+        elif args.optimization_report:
             # Run optimization analysis
             opportunities = analyze_optimization_opportunities(args.input_path)
             print_optimization_report(opportunities, args.input_path)
