@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/Users/julian/Programming/Python/JNF_Experiments/slide_size/venv/bin/python
 """
 PowerPoint Heavy Slides Analyzer
 
